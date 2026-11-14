@@ -1,0 +1,40 @@
+[project]
+name = "meetingtool"
+version = "0.1.0"
+description = "Ghi hình cuộc họp (kiểu OBS) + chép lời tiếng Anh realtime bằng faster-whisper, tối ưu cho macOS."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "faster-whisper>=1.2.0",
+    "numpy>=1.26",
+    # PySide6 6.12+ only ships macOS 14+ wheels; MacBook Pro 2017 tops out at macOS 13.
+    "PySide6-Essentials>=6.7,<6.12",
+    "webrtcvad-wheels>=2.0.14",
+    # Exclude the app window from screen capture (NSWindowSharingNone).
+    "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
+    # onnxruntime 1.23.x is the last release shipping Intel-mac (x86_64) wheels.
+    "onnxruntime<=1.23.2; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+]
+
+[project.scripts]
+meetingtool = "meetingtool.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.0,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv]
+# Guarantee the lockfile resolves for the target machine (MacBook Pro 2017, Intel)
+# as well as Apple Silicon.
+required-environments = [
+    "sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
