@@ -28,16 +28,46 @@ VIDEO_ENCODERS = {
     "H.264 (x264 - CPU)": "libx264",
 }
 
-# Final (punctuated) models, best quality/speed trade-offs for CPU first.
+# Transcription language: label -> code. "auto" detects English vs Vietnamese
+# for every utterance (speakers may switch language mid-meeting).
+LANGUAGES: dict[str, str] = {
+    "Tự động (Anh + Việt)": "auto",
+    "Tiếng Anh": "en",
+    "Tiếng Việt": "vi",
+}
+AUTO_LANGUAGES = ("en", "vi")  # candidates considered in "auto" mode
+
+# Final (punctuated) models. Multilingual models (no ".en") handle English *and*
+# Vietnamese; ".en" models are English-only but a bit more accurate for English.
 FINAL_MODELS = [
+    "small",
+    "base",
+    "medium",
+    "large-v3-turbo",
     "small.en",
     "distil-small.en",
     "base.en",
     "distil-medium.en",
     "medium.en",
 ]
-PARTIAL_MODELS = ["tiny.en", "base.en", "(dùng mô hình chính)", "(tắt bản nháp)"]
+PARTIAL_MODELS = ["tiny", "base", "tiny.en", "base.en", "(dùng mô hình chính)", "(tắt bản nháp)"]
 
+# Per-language prompts that set the expected style (punctuation, casing).
+STYLE_PROMPTS = {
+    "en": "Hello, everyone. Thanks for joining the meeting today.",
+    "vi": "Xin chào mọi người. Cảm ơn mọi người đã tham gia cuộc họp hôm nay.",
+}
+
+
+def is_english_only(model: str | None) -> bool:
+    return bool(model) and model.endswith(".en")
+
+
+def multilingual_counterpart(model: str | None) -> str | None:
+    """'small.en' -> 'small', 'distil-medium.en' -> 'medium'; others unchanged."""
+    if not is_english_only(model):
+        return model
+    return model.removesuffix(".en").removeprefix("distil-")
 
 IS_INTEL = platform.machine() in ("x86_64", "AMD64", "i386")
 DEVICES = ["cpu", "mps"]  # mps = Metal GPU backend of CTranslate2 (experimental)
@@ -73,8 +103,9 @@ class RecordSettings:
 
 @dataclass
 class AsrSettings:
-    final_model: str = "small.en"
-    partial_model: str | None = "tiny.en"  # None -> no partials; "same" -> reuse final model
+    final_model: str = "small"
+    partial_model: str | None = "tiny"  # None -> no partials; "same" -> reuse final model
+    language: str = "auto"  # "auto" (English/Vietnamese per utterance), "en" or "vi"
     device: str = "cpu"
     compute_type: str = "int8"
     cpu_threads: int = field(default_factory=physical_cores)
@@ -90,7 +121,7 @@ class AsrSettings:
     min_rms: float = 0.004  # energy gate to ignore keyboard/fan noise
     remove_fillers: bool = True
     glossary: str = ""  # names / jargon to bias the decoder
-    style_prompt: str = "Hello, everyone. Thanks for joining the meeting today."
+    style_prompts: dict[str, str] = field(default_factory=lambda: dict(STYLE_PROMPTS))
     model_dir: Path | None = None  # cache dir for downloaded models
 
 

@@ -10,6 +10,11 @@ bounded on a 4-core Intel laptop:
   normalised (punctuation, casing) and replaces the partial.
 
 Finals always take priority; partials are skipped while there is a backlog.
+
+Language: with ``language="auto"`` every utterance is classified as English or
+Vietnamese (Whisper's language-ID restricted to those two), so a meeting can
+switch language from one sentence to the next. English-only (``.en``) models
+always decode English.
 """
 
 from __future__ import annotations
@@ -25,7 +30,7 @@ from typing import Callable
 
 import numpy as np
 
-from .config import SAMPLE_RATE, AsrSettings
+from .config import AUTO_LANGUAGES, SAMPLE_RATE, AsrSettings
 from .segmenter import Utterance, UtteranceSegmenter
 from .textnorm import clean_partial, is_hallucination, normalize
 
@@ -39,6 +44,7 @@ class Cue:
     start: float  # seconds on the recording's audio timeline
     end: float
     text: str
+    language: str = ""
 
 
 @dataclass
@@ -46,6 +52,7 @@ class PartialResult:
     utt_id: int
     start: float
     text: str
+    language: str = ""
 
 
 @dataclass
@@ -57,6 +64,34 @@ class FinalResult:
     cues: list[Cue] = field(default_factory=list)
     asr_seconds: float = 0.0
     latency: float | None = None  # wall-clock: end of speech -> final text
+    language: str = ""
+
+
+def is_multilingual(model) -> bool:
+    inner = getattr(model, "model", None)
+    return bool(getattr(inner, "is_multilingual", True))
+
+
+def pick_language(
+    probs: list[tuple[str, float]],
+    previous: str,
+    *,
+    duration: float,
+    allowed: tuple[str, ...] = AUTO_LANGUAGES,
+) -> str:
+    """Choose among ``allowed`` from Whisper's language probabilities.
+
+    Short, ambiguous utterances ("OK", "yes", names) keep the previous language
+    instead of flip-flopping.
+    """
+    scores = {lang: p for lang, p in probs if lang in allowed}
+    if not scores:
+        return previous
+    best = max(scores, key=scores.get)
+    if best != previous and previous in scores and duration < 1.5:
+        if scores[best] < 2.0 * scores[previous]:
+            return previous
+    return best
 
 
 class ModelPool:
@@ -127,7 +162,9 @@ class TranscriptionEngine:
             min_rms=cfg.min_rms,
         )
         self._finals: deque[Utterance] = deque()
-        self._history: deque[str] = deque(maxlen=12)
+        self._history: deque[tuple[str, str]] = deque(maxlen=12)  # (language, text)
+        self._last_lang = "vi" if cfg.language == "vi" else "en"
+        self._partial_lang: tuple[int, str] | None = None  # (utt_id, language)
         self._last_partial_pos = 0.0
         self._last_partial_text = ""
         self._eof = False
@@ -186,7 +223,12 @@ class TranscriptionEngine:
             self.partial_model = ModelPool.get(pm, cfg)
         self.ready.set()
         dev = getattr(self.final_model, "device_used", "cpu")
-        self.on_status(f"Mô hình sẵn sàng ({cfg.final_model} trên {dev})")
+        lang = cfg.language
+        if lang != "en" and not is_multilingual(self.final_model):
+            log.warning("%s is English-only; language=%s ignored", cfg.final_model, lang)
+            self.on_status(f"⚠ {cfg.final_model} chỉ hỗ trợ tiếng Anh – chọn mô hình không có '.en' cho tiếng Việt")
+            return
+        self.on_status(f"Mô hình sẵn sàng ({cfg.final_model} trên {dev}, ngôn ngữ: {lang})")
 
     def _run(self) -> None:
         try:
@@ -242,15 +284,33 @@ class TranscriptionEngine:
             return False
         return self._segmenter.position - self._last_partial_pos >= self.cfg.partial_interval_s
 
-    def _prompt(self) -> str | None:
+    def _language(self, model, audio: np.ndarray, *, detect: bool, duration: float) -> str:
+        """Language to decode ``audio`` with; runs language-ID only when ``detect``."""
+        if not is_multilingual(model):
+            return "en"
+        if self.cfg.language != "auto":
+            return self.cfg.language
+        if not detect:
+            return self._last_lang
+        try:
+            _, _, probs = model.detect_language(audio=audio)
+        except Exception:  # noqa: BLE001 - never lose a sentence over language-ID
+            log.exception("language detection failed")
+            return self._last_lang
+        return pick_language(probs, self._last_lang, duration=duration)
+
+    def _prompt(self, lang: str) -> str | None:
         parts = []
         if self.cfg.glossary.strip():
-            parts.append(f"Glossary: {self.cfg.glossary.strip()}.")
-        ctx = " ".join(self._history)
+            label = "Thuật ngữ" if lang == "vi" else "Glossary"
+            parts.append(f"{label}: {self.cfg.glossary.strip()}.")
+        # Only same-language context: an English prompt nudges Whisper to translate
+        # Vietnamese speech into English (and vice versa).
+        ctx = " ".join(t for lg, t in self._history if lg == lang)
         if ctx:
             parts.append(ctx[-400:])
-        elif self.cfg.style_prompt:
-            parts.append(self.cfg.style_prompt)
+        elif self.cfg.style_prompts.get(lang):
+            parts.append(self.cfg.style_prompts[lang])
         return " ".join(parts) or None
 
     def _do_partial(self) -> None:
@@ -259,22 +319,30 @@ class TranscriptionEngine:
             return
         self._last_partial_pos = self._segmenter.position
         t0 = time.perf_counter()
+        # Language-ID on the draft model until ~2 s of speech, then keep that answer.
+        dur = len(utt.audio) / SAMPLE_RATE
+        cached = self._partial_lang if self._partial_lang and self._partial_lang[0] == utt.id else None
+        if cached and dur >= 2.0:
+            lang = cached[1]
+        else:
+            lang = self._language(self.partial_model, utt.audio, detect=True, duration=dur)
+            self._partial_lang = (utt.id, lang)
         segments, _ = self.partial_model.transcribe(
             utt.audio,
-            language="en",
+            language=lang,
             beam_size=1,
             best_of=1,
             temperature=0.0,
             condition_on_previous_text=False,
             without_timestamps=True,
-            initial_prompt=self._prompt(),
+            initial_prompt=self._prompt(lang),
             vad_filter=False,
         )
         text = clean_partial(" ".join(s.text.strip() for s in segments))
         self.asr_time += time.perf_counter() - t0
         if text and text != self._last_partial_text and not is_hallucination(text):
             self._last_partial_text = text
-            self.on_partial(PartialResult(utt.id, utt.start, text))
+            self.on_partial(PartialResult(utt.id, utt.start, text, language=lang))
 
     def _latency_for(self, end_sample: int) -> float | None:
         with self._feed_lock:
@@ -289,14 +357,22 @@ class TranscriptionEngine:
         cfg = self.cfg
         t0 = time.perf_counter()
         # Falling behind (slow CPU, long monologue)? Trade a bit of accuracy for speed.
-        beam = 1 if self.backlog_seconds > cfg.degrade_backlog_s else cfg.beam_size
+        behind = self.backlog_seconds > cfg.degrade_backlog_s
+        beam = 1 if behind else cfg.beam_size
+        if behind and self._partial_lang and self._partial_lang[0] == utt.id:
+            lang = self._partial_lang[1]  # skip the extra encoder pass, reuse the draft's guess
+        else:
+            lang = self._language(
+                self.final_model, utt.audio, detect=not behind, duration=utt.end - utt.start
+            )
+        self._last_lang = lang
         segments, _ = self.final_model.transcribe(
             utt.audio,
-            language="en",
+            language=lang,
             beam_size=beam,
             temperature=[0.0, 0.2, 0.4, 0.6],
             condition_on_previous_text=False,
-            initial_prompt=self._prompt(),
+            initial_prompt=self._prompt(lang),
             without_timestamps=False,
             vad_filter=False,
             no_speech_threshold=0.6,
@@ -312,22 +388,25 @@ class TranscriptionEngine:
             raw = seg.text.strip()
             if is_hallucination(raw) and (seg.avg_logprob < -0.6 or utt.end - utt.start < 1.5):
                 continue
-            text = normalize(raw, remove_fillers=cfg.remove_fillers)
+            text = normalize(raw, remove_fillers=cfg.remove_fillers, language=lang)
             if not text:
                 continue
             start = utt.start + max(0.0, seg.start)
             end = min(utt.end, utt.start + max(seg.end, seg.start + 0.3))
-            cues.append(Cue(start, end, text))
+            cues.append(Cue(start, end, text, lang))
         dt = time.perf_counter() - t0
         self.asr_time += dt
         full = " ".join(c.text for c in cues)
         if full:
-            self._history.append(full)
+            self._history.append((lang, full))
         latency = self._latency_for(utt.end_sample)
         if latency is not None:
             self.latencies.append(latency)
         self._last_partial_text = ""
         self._last_partial_pos = self._segmenter.position
         self.on_final(
-            FinalResult(utt.id, utt.start, utt.end, full, cues, asr_seconds=dt, latency=latency)
+            FinalResult(
+                utt.id, utt.start, utt.end, full, cues,
+                asr_seconds=dt, latency=latency, language=lang,
+            )  # fmt: skip
         )

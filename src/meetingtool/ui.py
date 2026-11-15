@@ -36,11 +36,14 @@ from . import macos
 from .config import (
     DEVICES,
     FINAL_MODELS,
+    LANGUAGES,
     PARTIAL_MODELS,
     RESOLUTIONS,
     VIDEO_ENCODERS,
     AsrSettings,
     RecordSettings,
+    is_english_only,
+    multilingual_counterpart,
 )
 from .devices import encoder_available, list_devices
 from .engine import FinalResult, ModelPool, PartialResult
@@ -82,6 +85,9 @@ class TranscriptView(QTextEdit):
         self.partial_fmt.setForeground(QColor("#8a8a8a"))
         self.partial_fmt.setFontItalic(True)
         self.partial_fmt.setFontPointSize(15)
+        self.lang_fmt = QTextCharFormat(self.ts_fmt)
+        self.lang_fmt.setForeground(QColor("#16a34a"))
+        self.show_language = False  # tag lines with EN / VI (auto-detect mode)
 
     def clear_all(self) -> None:
         self.clear()
@@ -101,13 +107,15 @@ class TranscriptView(QTextEdit):
         cur.removeSelectedText()
         self._partial_start = None
 
-    def _append(self, start: float, text: str, fmt: QTextCharFormat) -> int:
+    def _append(self, start: float, text: str, fmt: QTextCharFormat, lang: str = "") -> int:
         cur = QTextCursor(self.document())
         cur.movePosition(QTextCursor.MoveOperation.End)
         pos = cur.position()
         if self._has_content:
             cur.insertBlock()
         cur.insertText(f"[{fmt_clock(start)}]  ", self.ts_fmt)
+        if self.show_language and lang:
+            cur.insertText(f"{lang.upper()}  ", self.lang_fmt)
         cur.insertText(text, fmt)
         return pos
 
@@ -115,7 +123,7 @@ class TranscriptView(QTextEdit):
         stick = self._at_bottom()
         self._remove_partial()
         had = self._has_content
-        self._partial_start = self._append(r.start, r.text + " …", self.partial_fmt)
+        self._partial_start = self._append(r.start, r.text + " …", self.partial_fmt, r.language)
         self._has_content = had  # a partial does not count as committed content
         if stick:
             self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
@@ -124,7 +132,7 @@ class TranscriptView(QTextEdit):
         stick = self._at_bottom()
         self._remove_partial()
         if r.text:
-            self._append(r.start, r.text, self.text_fmt)
+            self._append(r.start, r.text, self.text_fmt, r.language)
             self._has_content = True
         if stick:
             self.verticalScrollBar().setValue(self.verticalScrollBar().maximum())
@@ -195,10 +203,17 @@ class MainWindow(QMainWindow):
         left.addRow("Độ phân giải:", fmt_row)
         left.addRow("Bộ mã hóa:", self.cb_enc)
 
+        self.cb_lang = QComboBox()
+        self.cb_lang.addItems(list(LANGUAGES))
+        self.cb_lang.setToolTip(
+            "Tự động: nhận diện tiếng Anh hay tiếng Việt cho từng câu (có thể đổi qua lại trong cuộc họp)."
+        )
+        right.addRow("Ngôn ngữ:", self.cb_lang)
         self.cb_model = QComboBox()
         self.cb_model.addItems(FINAL_MODELS)
         self.cb_model.setToolTip(
-            "Mô hình tạo câu chuẩn (có dấu câu). small.en: chính xác nhất mà vẫn realtime trên i7 2017."
+            "Mô hình tạo câu chuẩn (có dấu câu). small: Anh + Việt, vẫn realtime trên i7 2017.\n"
+            "Mô hình '.en' chỉ chép tiếng Anh (chính xác hơn một chút cho tiếng Anh)."
         )
         self.cb_partial = QComboBox()
         self.cb_partial.addItems(PARTIAL_MODELS)
@@ -294,7 +309,7 @@ class MainWindow(QMainWindow):
         self.sp_threads.setValue(d.cpu_threads)
         self.sp_threads.setToolTip("Mặc định = số nhân vật lý (i7 2017: 4).")
         left.addRow("Số luồng CPU:", self.sp_threads)
-        self.ck_fillers = QCheckBox("Bỏ từ đệm (um, uh, erm…)")
+        self.ck_fillers = QCheckBox("Bỏ từ đệm (um, uh, ờ, ừm…)")
         self.ck_fillers.setChecked(d.remove_fillers)
         left.addRow("", self.ck_fillers)
 
@@ -359,7 +374,8 @@ class MainWindow(QMainWindow):
         self.btn_open.clicked.connect(self._open_folder)
         self.ck_hide.toggled.connect(self._apply_capture_visibility)
         self.ck_top.toggled.connect(self._apply_on_top)
-        self.cb_model.currentTextChanged.connect(lambda _: self._preload_models())
+        self.cb_lang.currentTextChanged.connect(lambda _: self._on_language_changed())
+        self.cb_model.currentTextChanged.connect(self._on_model_changed)
         self.cb_partial.currentTextChanged.connect(lambda _: self._preload_models())
         self.cb_device.currentTextChanged.connect(lambda _: self._preload_models())
         b = self.bridge
@@ -375,6 +391,7 @@ class MainWindow(QMainWindow):
         "res": "cb_res", "fps": "cb_fps", "enc": "cb_enc", "container": "cb_container",
         "model": "cb_model", "partial": "cb_partial", "screen": "cb_screen",
         "mic": "cb_mic", "sys": "cb_sys", "bitrate": "cb_bitrate", "device": "cb_device",
+        "language": "cb_lang",
     }  # fmt: skip
     _PERSIST_NUM = {
         "beam": "sp_beam", "threads": "sp_threads", "silence": "sp_silence", "maxlen": "sp_maxlen",
@@ -397,6 +414,9 @@ class MainWindow(QMainWindow):
         if not s.value("res"):
             self.cb_res.setCurrentText("1080p")
             self.cb_fps.setCurrentText("30")
+        if not s.value("language"):  # first run (or upgrade from the English-only version)
+            self.cb_lang.setCurrentIndex(0)
+        self._on_language_changed()
         self.ed_glossary.setText(s.value("glossary", ""))
         self.ed_out.setText(s.value("out", self.ed_out.text()))
         for key, attr in self._PERSIST_NUM.items():
@@ -422,6 +442,29 @@ class MainWindow(QMainWindow):
             s.setValue(key, getattr(self, attr).value())
         for key, attr in self._PERSIST_CK.items():
             s.setValue(key, getattr(self, attr).isChecked())
+
+    # ------------------------------------------------------------- language
+    def _language(self) -> str:
+        return LANGUAGES[self.cb_lang.currentText()]
+
+    def _on_language_changed(self) -> None:
+        """Vietnamese / auto need multilingual models: swap '.en' ones for their counterpart."""
+        if self._language() != "en":
+            for cb in (self.cb_model, self.cb_partial):
+                name = cb.currentText()
+                if is_english_only(name):
+                    i = cb.findText(multilingual_counterpart(name))
+                    if i >= 0:
+                        cb.setCurrentIndex(i)
+        self.view.show_language = self._language() == "auto"
+        self._preload_models()
+
+    def _on_model_changed(self, name: str) -> None:
+        if is_english_only(name) and self._language() != "en":
+            # An English-only model was picked on purpose: switch the language to match.
+            self.cb_lang.setCurrentText("Tiếng Anh")
+            self.statusBar().showMessage(f"{name} chỉ chép tiếng Anh – đã chuyển ngôn ngữ sang Tiếng Anh")
+        self._preload_models()
 
     # -------------------------------------------------------------- devices
     def refresh_devices(self) -> None:
@@ -477,6 +520,7 @@ class MainWindow(QMainWindow):
         return AsrSettings(
             final_model=self.cb_model.currentText(),
             partial_model=partial,
+            language=self._language(),
             device=self.cb_device.currentText(),
             cpu_threads=self.sp_threads.value(),
             beam_size=self.sp_beam.value(),

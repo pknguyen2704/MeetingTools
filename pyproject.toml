@@ -1,7 +1,7 @@
 [project]
 name = "meetingtool"
 version = "0.1.0"
-description = "Ghi hình cuộc họp (kiểu OBS) + chép lời tiếng Anh realtime bằng faster-whisper, tối ưu cho macOS."
+description = "Ghi hình cuộc họp (kiểu OBS) + chép lời tiếng Anh + tiếng Việt realtime bằng faster-whisper, tối ưu cho macOS."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [

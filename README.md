@@ -1,6 +1,8 @@
 # MeetingTool
 
-Ghi hình toàn bộ cuộc họp (màn hình + tiếng) và chép lời tiếng Anh **realtime**:
+Ghi hình toàn bộ cuộc họp (màn hình + tiếng) và chép lời **tiếng Anh và tiếng Việt** **realtime**:
+
+- Chế độ **Tự động (Anh + Việt)** nhận diện ngôn ngữ cho từng câu, nên cuộc họp có thể chuyển qua lại giữa hai thứ tiếng. Cũng có thể cố định Tiếng Anh hoặc Tiếng Việt.
 
 - Bản nháp hiện ngay khi đang nói (chữ xám nghiêng), cập nhật khoảng mỗi 1–1.5 s.
 - Khi người nói dừng hoặc chuyển câu, câu được chép lại bằng mô hình chính xác hơn và **chuẩn hóa** (dấu chấm, dấu phẩy, dấu hỏi, viết hoa, bỏ "um/uh").
@@ -29,7 +31,7 @@ uv sync
 uv run meetingtool
 ```
 
-Lần đầu chạy, ứng dụng tự tải mô hình về `~/.cache/huggingface`: `small.en` khoảng 480 MB, `tiny.en` khoảng 75 MB.
+Lần đầu chạy, ứng dụng tự tải mô hình về `~/.cache/huggingface`: `small` khoảng 480 MB, `tiny` khoảng 75 MB.
 
 ### Quyền macOS (bắt buộc)
 
@@ -57,6 +59,7 @@ ffmpeg sẽ trộn micro và âm thanh hệ thống, rồi đưa bản trộn đ
 | Màn hình / Micro / Âm thanh hệ thống | Thiết bị ghi (nút ↻ để quét lại) |
 | Độ phân giải, FPS, mp4/mkv | Chất lượng đầu ra: Gốc, 1440p, 1080p, 720p hoặc 480p |
 | Bộ mã hóa | VideoToolbox (phần cứng, khuyên dùng) hoặc x264 (dùng CPU) |
+| Ngôn ngữ | Tự động (Anh + Việt, nhận diện từng câu), Tiếng Anh hoặc Tiếng Việt. Ở chế độ tự động, mỗi dòng có nhãn `EN`/`VI` |
 | Mô hình chép lời, beam | Mô hình tạo câu chuẩn; beam cao thì chính xác hơn nhưng chậm hơn |
 | Bản nháp realtime | Mô hình nhỏ cho chữ chạy trực tiếp, có thể tắt |
 | Từ khóa | Tên riêng hoặc thuật ngữ giúp mô hình viết đúng (vd: `Kubernetes, OKR, Hanoi`) |
@@ -72,7 +75,7 @@ Mỗi phiên ghi lưu vào `~/Movies/MeetingTool/Meeting_<ngày-giờ>/`:
 meeting_<..>.mp4        video + audio
 meeting_<..>.srt/.vtt   phụ đề; đặt cùng tên với video nên VLC/IINA tự nạp
 meeting_<..>.txt        [00:01:23] Câu đã chuẩn hóa.
-meeting_<..>.json       start/end/text từng câu
+meeting_<..>.json       start/end/text/lang từng câu
 meeting_<..>.live.txt   ghi dần trong lúc họp, an toàn nếu ứng dụng bị tắt đột ngột
 ffmpeg.log
 ```
@@ -83,25 +86,30 @@ ffmpeg.log
 uv run meetingtool devices                                  # liệt kê màn hình / micro
 uv run meetingtool record --screen 1 --mic 0 --sys 2 --res 720p   # ghi không giao diện, Ctrl+C để dừng
 uv run meetingtool transcribe meeting.mp4 --realtime        # chạy pipeline realtime trên một file
+uv run meetingtool transcribe meeting.mp4 --language vi     # cố định tiếng Việt (auto | en | vi)
 uv run meetingtool bench                                    # đo tốc độ các mô hình trên máy này
 uv run meetingtool bench --models small.en --device mps     # thử GPU (Metal)
+uv run meetingtool bench --language vi                      # đo trên giọng đọc tiếng Việt (giọng Linh của macOS)
 ```
 
 ## Vì sao chọn các công nghệ này
 
 ### Chép lời: faster-whisper (CTranslate2, int8), chạy 2 tầng
 
-- Whisper tự sinh **dấu câu và viết hoa**, nên đáp ứng yêu cầu chuẩn hóa mà không cần thêm mô hình khôi phục dấu câu. Các mô hình `.en` chỉ dành cho tiếng Anh và chính xác hơn bản đa ngôn ngữ cùng cỡ.
+- Whisper tự sinh **dấu câu và viết hoa**, nên đáp ứng yêu cầu chuẩn hóa mà không cần thêm mô hình khôi phục dấu câu. Các mô hình `.en` chỉ dành cho tiếng Anh và chính xác hơn bản đa ngôn ngữ cùng cỡ. Để chép **tiếng Việt** phải dùng mô hình đa ngôn ngữ (không có `.en`); ứng dụng tự đổi `small.en` → `small` khi bạn chọn Tiếng Việt hoặc Tự động.
+- **Hai ngôn ngữ:** ở chế độ tự động, trước khi giải mã mỗi câu, mô hình chính chạy nhận diện ngôn ngữ nhưng chỉ chọn giữa `en` và `vi`. Câu ngắn và mơ hồ (vd. "OK") giữ ngôn ngữ của câu trước. Ngữ cảnh và prompt cũng tách riêng theo ngôn ngữ, để Whisper không dịch câu tiếng Việt sang tiếng Anh. Bước nhận diện tốn thêm một lượt encoder cho mỗi câu; khi máy bị tồn đọng, ứng dụng bỏ qua bước này và dùng lại ngôn ngữ mà bản nháp đã đoán. Hạn chế: nếu một câu trộn Anh lẫn Việt mà không ngắt nghỉ, Whisper chỉ chép theo một ngôn ngữ, và phần nói bằng ngôn ngữ còn lại có thể bị bỏ hoặc bị dịch.
 - CTranslate2 int8 là cách chạy Whisper trên CPU Intel nhanh nhất hiện nay (dùng AVX2), tiêu tốn RAM ít hơn PyTorch khoảng 4 lần. Card AMD Radeon không chạy được CUDA hay ROCm trên macOS, nên mặc định dùng CPU. Có tùy chọn `mps` (Metal, thử nghiệm); nếu không chạy được, ứng dụng tự quay về CPU.
 - **Hai tầng:**
-  - `tiny.en` giải mã nhanh (greedy) phần câu đang nói để hiện bản nháp.
-  - Khi VAD phát hiện người nói ngừng khoảng 700 ms, `small.en` giải mã lại cả câu bằng beam search, kèm ngữ cảnh các câu trước, rồi chuẩn hóa văn bản.
+  - `tiny` giải mã nhanh (greedy) phần câu đang nói để hiện bản nháp (`base` cho bản nháp tiếng Việt dễ đọc hơn, đổi lại chậm hơn).
+  - Khi VAD phát hiện người nói ngừng khoảng 700 ms, `small` giải mã lại cả câu bằng beam search, kèm ngữ cảnh các câu trước, rồi chuẩn hóa văn bản.
   - Câu chuẩn luôn được ưu tiên xử lý trước. Bản nháp tự bỏ qua khi máy đang bị tồn đọng, và nếu tồn đọng quá 8 s thì beam tự giảm về 1 để không bị trễ dồn.
 - Gợi ý chọn mô hình trên i7 2017 (hãy chạy `meetingtool bench` để có số liệu thật trên máy bạn):
 
   | Mô hình | Độ chính xác | Tốc độ | Khi nào dùng |
   |---|---|---|---|
-  | `small.en` (mặc định) | tốt | đủ realtime với beam 2 | mặc định |
+  | `small` (mặc định) | tốt, Anh + Việt | đủ realtime với beam 2 | họp tiếng Việt hoặc song ngữ |
+  | `medium`, `large-v3-turbo` | tiếng Việt tốt hơn nhiều | nặng, khó realtime trên i7 2017 | máy mạnh (Apple Silicon) |
+  | `small.en` | tốt nhất cho tiếng Anh ở cỡ này | đủ realtime với beam 2 | họp chỉ có tiếng Anh |
   | `distil-small.en` | gần bằng small | nhanh hơn | máy nóng hoặc chậm |
   | `base.en` | khá | rất nhanh | ưu tiên tiết kiệm CPU |
   | `medium.en`, `distil-medium.en` | tốt nhất | nặng | máy mạnh hơn |
@@ -131,7 +139,7 @@ src/meetingtool/
   recorder.py    lệnh ffmpeg, tap PCM, remux, đo lệch
   segmenter.py   VAD (WebRTC) + ngắt câu theo khoảng lặng
   engine.py      faster-whisper: bản nháp + bản chuẩn, ModelPool
-  textnorm.py    chuẩn hóa dấu câu, viết hoa, lọc ảo giác
+  textnorm.py    chuẩn hóa dấu câu, viết hoa (Unicode, có tiếng Việt), lọc ảo giác
   transcript.py  xuất SRT / VTT / TXT / JSON
   devices.py     tìm ffmpeg, liệt kê thiết bị avfoundation
   macos.py       ẩn cửa sổ khỏi bản ghi màn hình

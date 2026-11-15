@@ -52,7 +52,7 @@ class TranscriptStore:
             start, end = c.start + offset, c.end + offset
             if out and start < out[-1].end:  # never overlap the previous cue
                 out[-1].end = max(out[-1].start + 0.1, start)
-            out.append(Cue(start, max(end, start + 0.3), c.text))
+            out.append(Cue(start, max(end, start + 0.3), c.text, c.language))
         return out
 
     # ------------------------------------------------------------- exporters
@@ -69,7 +69,10 @@ class TranscriptStore:
         paths["txt"].write_text(to_txt(cues), encoding="utf-8")
         paths["json"].write_text(
             json.dumps(
-                [{"start": round(c.start, 3), "end": round(c.end, 3), "text": c.text} for c in cues],
+                [
+                    {"start": round(c.start, 3), "end": round(c.end, 3), "text": c.text, "lang": c.language}
+                    for c in cues
+                ],
                 ensure_ascii=False,
                 indent=2,
             ),

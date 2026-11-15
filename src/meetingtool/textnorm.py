@@ -1,22 +1,32 @@
-"""Light-weight English transcript normalisation.
+"""Light-weight transcript normalisation (English and Vietnamese).
 
 Whisper already emits punctuation and casing; this module makes the final text
 consistent: spacing around punctuation, sentence capitalisation, a terminal
 period, ellipsis clean-up, filler-word removal and hallucination filtering.
+All letter classes are Unicode-aware so Vietnamese diacritics (đ, ă, ơ, ấ…)
+are handled like ASCII letters.
 """
 
 from __future__ import annotations
 
 import re
+import unicodedata
 
-_FILLERS = r"(?:um+|uh+|erm+|er|ah+|hmm+|mm+|mhm)"
-_FILLER_RE = re.compile(rf"(?<![\w'])({_FILLERS})(?![\w'])[,.]?\s*", re.IGNORECASE)
+_FILLERS_EN = r"um+|uh+|erm+|er|ah+|hmm+|mm+|mhm"
+# Vietnamese hesitation sounds. "à", "ừ", "ạ" are left alone: they are meaningful
+# particles ("anh đi à?", "ừ, được", "vâng ạ").
+_FILLERS_VI = r"ờ+|ờm+|ừm+|ưm+|ơ+|um+|uh+|hmm+|mm+"
+_FILLER_RE = {
+    lang: re.compile(rf"(?<![\w'])({words})(?![\w'])[,.]?\s*", re.IGNORECASE)
+    for lang, words in (("en", _FILLERS_EN), ("vi", _FILLERS_VI))
+}
+_LETTER = r"[^\W\d_]"  # any Unicode letter
 _SPACE_BEFORE_PUNCT = re.compile(r"\s+([,.;:!?%])")
-_MISSING_SPACE_AFTER = re.compile(r"([,;:!?]|(?<!\d)\.)(?=[A-Za-z])")
+_MISSING_SPACE_AFTER = re.compile(rf"([,;:!?]|(?<!\d)\.)(?={_LETTER})")
 _DUP_PUNCT = re.compile(r"([,;:])\s*[,;:]+")
 _COMMA_BEFORE_END = re.compile(r",\s*([.!?])")
 _MULTI_SPACE = re.compile(r"\s{2,}")
-_SENTENCE_START = re.compile(r"(^|[.!?]\s+)([a-z])")
+_SENTENCE_START = re.compile(rf"(^|[.!?]\s+)({_LETTER})")
 _LONE_I = re.compile(r"\bi\b(?=(?:'(?:m|ll|ve|d)\b|\s|[,.!?]|$))")
 
 # Phrases Whisper is known to hallucinate on near-silence / noise.
@@ -34,7 +44,24 @@ HALLUCINATIONS = {
     "subtitles by the amara.org community",
     "please subscribe.",
     "...",
+    # Vietnamese (YouTube outros Whisper learned from its training data)
+    "cảm ơn.",
+    "xin cảm ơn.",
+    "cảm ơn các bạn đã theo dõi.",
+    "cảm ơn các bạn đã xem video.",
+    "cảm ơn các bạn đã lắng nghe.",
+    "hẹn gặp lại các bạn trong những video tiếp theo.",
+    "vâng.",
 }
+# Substrings that only ever appear in hallucinated channel plugs.
+_HALLUCINATION_SNIPPETS = (
+    "ghiền mì gõ",
+    "subscribe cho kênh",
+    "đăng ký kênh",
+    "đăng kí kênh",
+    "like và subscribe",
+    "amara.org",
+)
 
 
 def clean_partial(text: str) -> str:
@@ -42,14 +69,14 @@ def clean_partial(text: str) -> str:
     return _MULTI_SPACE.sub(" ", text).strip()
 
 
-def normalize(text: str, *, remove_fillers: bool = True) -> str:
-    t = text.strip()
+def normalize(text: str, *, remove_fillers: bool = True, language: str = "en") -> str:
+    t = unicodedata.normalize("NFC", text).strip()
     if not t:
         return ""
     t = t.replace("…", "...")
     t = t.strip(" -—")
     if remove_fillers:
-        t = _FILLER_RE.sub("", t)
+        t = _FILLER_RE.get(language, _FILLER_RE["en"]).sub("", t)
     # Ellipses: trailing -> period, leading -> drop, internal hesitation -> comma.
     t = re.sub(r"^\s*\.{2,}\s*", "", t)
     t = re.sub(r"\s*\.{2,}\s*$", ".", t)
@@ -62,7 +89,8 @@ def normalize(text: str, *, remove_fillers: bool = True) -> str:
     t = _MULTI_SPACE.sub(" ", t).strip(" ,;:")
     if not t:
         return ""
-    t = _LONE_I.sub("I", t)
+    if language == "en":
+        t = _LONE_I.sub("I", t)
     t = _SENTENCE_START.sub(lambda m: m.group(1) + m.group(2).upper(), t)
     if t[-1] not in ".!?\"')]":
         t += "."
@@ -72,4 +100,5 @@ def normalize(text: str, *, remove_fillers: bool = True) -> str:
 
 
 def is_hallucination(text: str) -> bool:
-    return text.strip().lower() in HALLUCINATIONS
+    t = unicodedata.normalize("NFC", text).strip().lower()
+    return t in HALLUCINATIONS or any(s in t for s in _HALLUCINATION_SNIPPETS)

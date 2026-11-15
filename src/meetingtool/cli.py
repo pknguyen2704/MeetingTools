@@ -22,13 +22,17 @@ from pathlib import Path
 
 import numpy as np
 
-from .config import FINAL_MODELS, RESOLUTIONS, SAMPLE_RATE, AsrSettings, RecordSettings
+from .config import FINAL_MODELS, RESOLUTIONS, SAMPLE_RATE, AsrSettings, RecordSettings, is_english_only
 from .devices import find_tool, list_devices
 
 
 def _asr_from_args(a: argparse.Namespace) -> AsrSettings:
-    cfg = AsrSettings(final_model=a.model, beam_size=a.beam, glossary=a.glossary or "", device=a.device)
+    cfg = AsrSettings(
+        final_model=a.model, beam_size=a.beam, glossary=a.glossary or "", device=a.device, language=a.language
+    )
     cfg.partial_model = None if a.partial_model == "none" else a.partial_model
+    if a.language != "en" and is_english_only(a.model):
+        print(f"Cảnh báo: {a.model} chỉ chép tiếng Anh; dùng --model small để chép cả tiếng Việt.", file=sys.stderr)
     if a.threads:
         cfg.cpu_threads = a.threads
     return cfg
@@ -192,6 +196,14 @@ def cmd_transcribe(a: argparse.Namespace) -> int:
     return 0
 
 
+_BENCH_TEXT_VI = (
+    "Chào buổi sáng mọi người, cảm ơn đã tham gia. Hôm nay chúng ta sẽ xem lại kế hoạch quý. "
+    "Thứ nhất, bản phát hành di động bị chậm hai tuần vì phần tích hợp thanh toán. "
+    "Thứ hai, chúng ta cần quyết định chuyển cơ sở dữ liệu trước hay sau khi ra mắt. "
+    "Mọi người có lo ngại gì về tiến độ không? "
+    "Được rồi, chúng ta chuyển sang kế hoạch tuyển dụng cho quý tới."
+)
+
 _BENCH_TEXT = (
     "Good morning everyone, thanks for joining. Today we will review the quarterly roadmap. "
     "First, the mobile release slipped by two weeks because of the payment integration. "
@@ -211,14 +223,23 @@ def cmd_bench(a: argparse.Namespace) -> int:
         tmp = Path(tempfile.mkdtemp())
         sample = tmp / "bench.aiff"
         # Pauses between sentences so the segmenter sees separate utterances.
-        text = _BENCH_TEXT.replace(". ", ". [[slnc 900]] ").replace("? ", "? [[slnc 900]] ")
-        subprocess.run(["say", "-o", str(sample), text], check=True)
-    models = a.models.split(",") if a.models else ["base.en", "distil-small.en", "small.en"]
+        vi = a.language == "vi"
+        base = _BENCH_TEXT_VI if vi else _BENCH_TEXT
+        text = base.replace(". ", ". [[slnc 900]] ").replace("? ", "? [[slnc 900]] ")
+        voice = ["-v", "Linh"] if vi else []  # macOS Vietnamese voice (System Settings → Spoken Content)
+        subprocess.run(["say", *voice, "-o", str(sample), text], check=True)
+    if a.models:
+        models = a.models.split(",")
+    elif a.language == "en":
+        models = ["base.en", "distil-small.en", "small.en"]
+    else:
+        models = ["base", "small"]
     print(f"Mẫu: {sample}  ·  cpu_threads={a.threads or AsrSettings().cpu_threads}\n")
     rows = []
     for m in models:
+        partial = None if a.no_partial else ("tiny.en" if is_english_only(m) else "tiny")
         cfg = AsrSettings(
-            final_model=m, partial_model=None if a.no_partial else "tiny.en", beam_size=a.beam, device=a.device
+            final_model=m, partial_model=partial, beam_size=a.beam, device=a.device, language=a.language
         )
         if a.threads:
             cfg.cpu_threads = a.threads
@@ -240,9 +261,17 @@ def cmd_bench(a: argparse.Namespace) -> int:
 
 
 # ------------------------------------------------------------------------ main
+def _add_language_arg(p: argparse.ArgumentParser, default: str = "auto") -> None:
+    p.add_argument(
+        "--language", default=default, choices=["auto", "en", "vi"],
+        help="auto = tự nhận diện Anh/Việt từng câu (mặc định); en; vi",
+    )  # fmt: skip
+
+
 def _add_asr_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--model", default="small.en", help=f"mô hình chính ({', '.join(FINAL_MODELS)})")
-    p.add_argument("--partial-model", default="tiny.en", help="mô hình bản nháp, 'same' hoặc 'none'")
+    p.add_argument("--model", default="small", help=f"mô hình chính ({', '.join(FINAL_MODELS)})")
+    p.add_argument("--partial-model", default="tiny", help="mô hình bản nháp, 'same' hoặc 'none'")
+    _add_language_arg(p)
     p.add_argument("--beam", type=int, default=AsrSettings().beam_size)
     p.add_argument("--device", default="cpu", choices=["cpu", "mps"], help="mps = GPU Metal (thử nghiệm)")
     p.add_argument("--threads", type=int, default=0, help="số luồng CPU (mặc định = số nhân vật lý)")
@@ -276,7 +305,8 @@ def main(argv: list[str] | None = None) -> int:
     _add_asr_args(p)
 
     p = sub.add_parser("bench", help="đo tốc độ các mô hình trên máy này")
-    p.add_argument("--models", default=None, help="vd: base.en,distil-small.en,small.en")
+    p.add_argument("--models", default=None, help="vd: base,small hoặc base.en,small.en")
+    _add_language_arg(p, default="en")
     p.add_argument("--file", default=None)
     p.add_argument("--beam", type=int, default=AsrSettings().beam_size)
     p.add_argument("--device", default="cpu", choices=["cpu", "mps"])
